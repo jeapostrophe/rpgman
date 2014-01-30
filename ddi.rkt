@@ -38,6 +38,7 @@
   (define dest-dir (build-path here "ddi"))
   (make-directory* dest-dir)
 
+  (define all 0)
   (for ([t (in-list tabs)])
     (printf "~a\n" t)
 
@@ -66,4 +67,21 @@
       (error 'ddi "~a: count mismatch: ~e vs ~e"
              t expected-total actual-total))
 
-    (printf "\t~a\n" actual-total)))
+    (printf "\t~a\n" actual-total)
+    (set! all (+ all actual-total))
+
+    (define tab.db (build-path dest-dir (format "~a.db" t)))
+    (make-directory* tab.db)
+    (printf "\t\t")
+    (for ([r (in-list rs)]
+          [i (in-range 10)])
+      (match-define `(,_ " " (ID ,ID) . ,_) r)
+      (define ID.entry (build-path tab.db ID))
+      (unless (file-exists? ID.entry)
+        (printf "~a = ~a, " i ID)))
+    (printf "\n"))
+
+  (printf "Database Size: ~a\n" all)
+  (printf "Seconds between Requests: ~a\n"
+          (real->decimal-string 
+           (/ (* 60 60 24 28) all))))
