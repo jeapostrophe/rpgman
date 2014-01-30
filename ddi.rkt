@@ -1,7 +1,10 @@
 #lang racket/base
 (require net/url
+         racket/runtime-path
          racket/match
          racket/list
+         racket/file
+         racket/port
          xml/path
          xml)
 
@@ -30,10 +33,19 @@
 (define (se-path*/list+tags p xe)
   (filter pair? (se-path*/list p xe)))
 
+(define-runtime-path throttle.time ".throttle")
+(define (http-sendrecv/url+throttle rate-s u)
+  (define p throttle.time)
+  (unless (file-exists? p)
+    (write-to-file -inf.0 p))
+  (define last (file->value p))
+  (sync (alarm-evt (+ last (* 1000 rate-s))))
+  (write-to-file (current-inexact-milliseconds) p
+                 #:exists 'replace)
+  (http-sendrecv/url u))
+
 (module+ main
-  (require racket/runtime-path
-           racket/file
-           racket/port)
+  (define RATE 10)
   (define-runtime-path here ".")
   (define dest-dir (build-path here "ddi"))
   (make-directory* dest-dir)
@@ -46,7 +58,7 @@
     (unless (file-exists? tab.xml)
       (define tab-url-s (format all-url-s t))
       (define tab-url (string->url tab-url-s))
-      (define-values (st hd data) (http-sendrecv/url tab-url))
+      (define-values (st hd data) (http-sendrecv/url+throttle RATE tab-url))
       (display-to-file (port->bytes data) tab.xml))
 
     (define xs (file->string tab.xml))
@@ -83,5 +95,5 @@
 
   (printf "Database Size: ~a\n" all)
   (printf "Seconds between Requests: ~a\n"
-          (real->decimal-string 
+          (real->decimal-string
            (/ (* 60 60 24 28) all))))
