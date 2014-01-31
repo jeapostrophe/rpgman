@@ -92,9 +92,7 @@
          (for-each displayln hd)
          (displayln (port->string data))
 
-         )
-
-       (exit 0)])]
+         (exit 0))])]
     [(regexp-match #rx"200" st)
      (values st hd data)]
     [else
