@@ -105,10 +105,8 @@
   (define dest-dir (build-path here "ddi"))
   (make-directory* dest-dir)
 
-  ;; xxx grab from somewhere
-  (define EMAIL "email@site.com")
-  ;; xxx grab from somewhere
-  (define PASSWORD "pass")
+  (define EMAIL (first (file->lines (build-path here ".ddi_email"))))
+  (define PASSWORD (first (file->lines (build-path here ".ddi_pass"))))
 
   (collapse-whitespace #t)
   (xexpr-drop-empty-attributes #t)
