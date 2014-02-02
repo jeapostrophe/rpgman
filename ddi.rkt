@@ -2,6 +2,8 @@
 (require net/url
          racket/runtime-path
          racket/match
+         racket/path
+         racket/string
          racket/list
          racket/file
          racket/port
@@ -19,6 +21,8 @@
   "http://wizards.com/dndinsider/compendium/~a.aspx?id=~a")
 (define top-login-url-s
   "http://wizards.com/dndinsider/compendium/login.aspx")
+(define static-url-s
+  "http://wizards.com/dndinsider/compendium/~a")
 
 (define (se-path*/list+tags p xe)
   (filter pair? (se-path*/list p xe)))
@@ -110,7 +114,9 @@
   (define RATE 2)
   (define-runtime-path here ".")
   (define dest-dir (build-path here "ddi"))
+  (define static-dir (build-path dest-dir "static"))
   (make-directory* dest-dir)
+  (make-directory* static-dir)
 
   (define EMAIL (first (file->lines (build-path here ".ddi_email"))))
   (define PASSWORD (first (file->lines (build-path here ".ddi_pass"))))
@@ -173,7 +179,38 @@
           (define-values (st hd data)
             (http-sendrecv/url+throttle+login EMAIL PASSWORD COOKIE RATE ID.url))
 
-          (display-to-file (port->bytes data) ID.entry)))))
+          (display-to-file (port->bytes data) ID.entry))
+
+        (let ()
+          (local-require sxml/html
+                         sxml)
+          (define xe (html->xexp (file->string ID.entry)))
+
+          (define statics
+            (append ((sxpath '(// link @ href *text*)) xe)
+                    ((sxpath '(// img @ src *text*)) xe)))
+
+          (for ([ms (in-list statics)])
+            (define-values
+              (s url-s)
+              (if (regexp-match #rx"^http:" ms)
+                (values (string-join
+                         (map path/param-path
+                              (url-path (string->url ms)))
+                         "/")
+                        ms)
+                (values ms (format static-url-s ms))))
+            (define static.pth (build-path static-dir s))
+            (unless (file-exists? static.pth)
+              (printf "~a\n" s)
+              (make-directory* (path-only static.pth))
+              (define static.url (string->url url-s))
+
+              (define-values (st hd data)
+                (http-sendrecv/url+throttle+login
+                 EMAIL PASSWORD COOKIE RATE
+                 static.url))
+              (display-to-file (port->bytes data) static.pth)))))))
 
   (printf "Database Size: ~a\n" all)
   (printf "Seconds between Requests: ~a\n"
