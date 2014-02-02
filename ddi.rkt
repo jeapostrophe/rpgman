@@ -17,6 +17,8 @@
   "http://wizards.com/dndinsider/compendium/CompendiumSearch.asmx/ViewAll?&Tab=~a")
 (define entry-url-s
   "http://wizards.com/dndinsider/compendium/~a.aspx?id=~a")
+(define top-login-url-s
+  "http://wizards.com/dndinsider/compendium/login.aspx")
 
 (define (se-path*/list+tags p xe)
   (filter pair? (se-path*/list p xe)))
@@ -38,9 +40,12 @@
                      #:headers headers
                      u))
 
-(define (http-sendrecv/url+throttle+login email password rate u)
+(define (http-sendrecv/url+throttle+login email password cookie rate u)
   (define-values (st hd data)
-    (http-sendrecv/url+throttle rate u))
+    (http-sendrecv/url+throttle
+     #:headers
+     (list cookie)
+     rate u))
 
   (cond
     [(and (regexp-match #rx"302" st)
@@ -48,7 +53,7 @@
      =>
      (match-lambda
       [(list _ (app bytes->string/utf-8 login-url-s))
-       (define login-url (string->url login-url-s))
+       (define login-url (string->url top-login-url-s))
        (define-values (st hd data)
          (http-sendrecv/url+throttle 0 login-url))
        (define data-xe (string->xexpr (port->string data)))
@@ -88,8 +93,10 @@
             #:headers (list "Content-Type: application/x-www-form-urlencoded")
             0 login-url))
 
+         ;; xxx this is it
+
          (displayln st)
-         (for-each displayln hd)
+         (for-each displayln (filter (λ (h) (regexp-match #rx"Set-Cookie:" h)) hd))
          (displayln (port->string data))
 
          (exit 0))])]
@@ -100,13 +107,14 @@
             "Unknown response: ~e" (vector st hd (port->bytes data)))]))
 
 (module+ main
-  (define RATE 10)
+  (define RATE 2)
   (define-runtime-path here ".")
   (define dest-dir (build-path here "ddi"))
   (make-directory* dest-dir)
 
   (define EMAIL (first (file->lines (build-path here ".ddi_email"))))
   (define PASSWORD (first (file->lines (build-path here ".ddi_pass"))))
+  (define COOKIE (file->string (build-path here ".ddi_cookie")))
 
   (collapse-whitespace #t)
   (xexpr-drop-empty-attributes #t)
@@ -138,28 +146,34 @@
       (error 'ddi "~a: count mismatch: ~e vs ~e"
              t expected-total actual-total))
 
-    (printf "\t~a\n" actual-total)
+    (printf " ~a\n" actual-total)
     (set! all (+ all actual-total))
 
     (define tab.db (build-path dest-dir (format "~a.db" t)))
     (make-directory* tab.db)
     (for ([r (in-list rs)]
-          [i (in-range 1)])
-      (match-define `(,_ " " (ID ,ID) . ,_) r)
-      (define ID.entry (build-path tab.db ID))
-      (unless (file-exists? ID.entry)
-        (define ID.url-s
-          (format entry-url-s
-                  (string-downcase t)
-                  ID))
-        (printf "\t\t~a. ~a\n" i ID.url-s)
-        (define ID.url
-          (string->url ID.url-s))
+          ;; (in-range 1)
+          [i (in-naturals)])
+      (with-handlers ([exn:fail?
+                       (λ (x)
+                         ((error-display-handler) (exn-message x) x))])
+        (match-define `(,_ " " (ID ,ID) . ,_) r)
+        (define ID.entry (build-path tab.db ID))
+        (unless (file-exists? ID.entry)
+          (define ID.url-s
+            (format entry-url-s
+                    ;; "skill" and "companion" are necessary for like
+                    ;; 7 entries from Glossary and Familiars
+                    (string-downcase t)
+                    ID))
+          (printf "  ~a/~a. ~a\n" i actual-total ID.url-s)
+          (define ID.url
+            (string->url ID.url-s))
 
-        (define-values (st hd data)
-          (http-sendrecv/url+throttle+login EMAIL PASSWORD RATE ID.url))
+          (define-values (st hd data)
+            (http-sendrecv/url+throttle+login EMAIL PASSWORD COOKIE RATE ID.url))
 
-        (display-to-file (port->bytes data) ID.entry))))
+          (display-to-file (port->bytes data) ID.entry)))))
 
   (printf "Database Size: ~a\n" all)
   (printf "Seconds between Requests: ~a\n"
