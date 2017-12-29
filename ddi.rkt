@@ -1,218 +1,176 @@
+#!/usr/bin/env racket
 #lang racket/base
-(require net/url
-         racket/runtime-path
-         racket/match
-         racket/path
-         racket/string
+(require racket/runtime-path
+         racket/pretty
+         math/base
          racket/list
-         racket/file
-         racket/port
-         net/uri-codec
-         xml/path
-         xml)
+         racket/match
+         racket/format
+         racket/string
+         racket/set
+         db
+         sxml
+         text-table)
+(define-runtime-path ddi "ddi")
 
-(define tabs
-  '("Race" "Class" "Item" "Monster" "EpicDestiny" "ParagonPath"
-    "Ritual" "Feat" "Power" "Glossary" "Deity" "Trap" "Background"
-    "Companion" "Disease" "Poison" "Terrain" "Theme"))
-(define all-url-s
-  "http://wizards.com/dndinsider/compendium/CompendiumSearch.asmx/ViewAll?&Tab=~a")
-(define entry-url-s
-  "http://wizards.com/dndinsider/compendium/~a.aspx?id=~a")
-(define top-login-url-s
-  "http://wizards.com/dndinsider/compendium/login.aspx")
-(define static-url-s
-  "http://wizards.com/dndinsider/compendium/~a")
+(define (file->sxml f)
+  (call-with-input-file f
+    (λ (ip) (ssax:xml->sxml ip '()))))
 
-(define (se-path*/list+tags p xe)
-  (filter pair? (se-path*/list p xe)))
+(define (string-list->list s)
+  (map string-trim (string-split s ",")))
+(define (string-list->set s)
+  (list->set (map string->symbol (string-list->list s))))
+(define (sj . l) (string-join l))
 
-(define-runtime-path throttle.time ".throttle")
-(define (http-sendrecv/url+throttle #:method [method #"GET"]
-                                    #:data [data #f]
-                                    #:headers [headers empty]
-                                    rate-s u)
-  (define p throttle.time)
-  (unless (file-exists? p)
-    (write-to-file -inf.0 p))
-  (define last (file->value p))
-  (sync (alarm-evt (+ last (* 1000 rate-s))))
-  (write-to-file (current-inexact-milliseconds) p
-                 #:exists 'replace)
-  (http-sendrecv/url #:method method
-                     #:data data
-                     #:headers headers
-                     u))
+(define okay-source-books
+  (set
+   ;; Original Book
+   #;"Monster Manual"
+   ;; Supposedly these two books are great
+   "Monster Manual 3"
+   "Monster Vault"))
+(define (monster-initialize!)
+  (define db (sqlite3-connect #:database (build-path ddi "Monster.sqlite")
+                              #:mode 'create))
+  (unless (table-exists? db "Monsters")
+    (query-exec db
+                (sj
+                 "CREATE TABLE Monsters ("
+                 "ID integer PRIMARY KEY,"
+                 "Name text NOT NULL,"
+                 "Level integer,"
+                 "GroupRole text NOT NULL,"
+                 "CombatRole text NOT NULL"
+                 ");"))
+    (define stmt (sj "INSERT INTO Monsters"
+                     "(ID, Name, Level, GroupRole, CombatRole)"
+                     "VALUES ($1, $2, $3, $4, $5)"))
 
-(define (http-sendrecv/url+throttle+login email password cookie rate u)
-  (define-values (st hd data)
-    (http-sendrecv/url+throttle
-     #:headers
-     (list cookie)
-     rate u))
+    (define mon-xml (file->sxml (build-path ddi "Monster.xml")))
+    (match-define `(*TOP* ,_ (Data (Results . ,mons) (Totals . ,_))) mon-xml)
+    (for ([m (in-list mons)])
+      (match-define `(Monster (ID ,id) (Name ,name) (Level ,(app string->number lvl))
+                              (GroupRole ,gr) (CombatRole ,cr) (SourceBook ,sb))
+        m)
+      (define sbs (list->set (string-list->list sb)))
+      (unless (set-empty? (set-intersect sbs okay-source-books))
+        (query-exec db stmt id name lvl gr cr)))))
 
-  (cond
-    [(and (regexp-match #rx"302" st)
-          (ormap (λ (h) (regexp-match #rx"^Location: (.*?)$" h)) hd))
-     =>
-     (match-lambda
-      [(list _ (app bytes->string/utf-8 login-url-s))
-       (define login-url (string->url top-login-url-s))
-       (define-values (st hd data)
-         (http-sendrecv/url+throttle 0 login-url))
-       (define data-xe (string->xexpr (port->string data)))
+(define TotalXP-PHB-pg29
+  (make-immutable-hasheq
+   ;; Level TotalXP
+   '([ 1       0]
+     [ 2    1000]
+     [ 3    2250]
+     [ 4    3750]
+     [ 5    5500]
+     [ 6    7500]
+     [ 7   10000]
+     [ 8   13000]
+     [ 9   16500]
+     [10   20500]
+     [11   26000]
+     [12   32000]
+     [13   39000]
+     [14   47000]
+     [15   57000]
+     [16   69000]
+     [17   83000]
+     [18   99000]
+     [19  119000]
+     [20  143000]
+     [21  175000]
+     [22  210000]
+     [23  255000]
+     [24  310000]
+     [25  375000]
+     [26  450000]
+     [27  550000]
+     [28  675000]
+     [29  825000]
+     [30 1000000])))
 
-       (define cookie-bs
-         (second
-          (ormap (λ (h) (regexp-match #rx"^Set-Cookie: (.*?);.*$" h)) hd)))
+(define ExperiencePointRewards-DMG-pg56
+  (make-immutable-hasheq
+   ;; Lvl  Standard Minion Elite Solo
+   '([ 1   100    25   200    500]
+     [ 2   125    31   250    625]
+     [ 3   150    38   300    750]
+     [ 4   175    44   350    875]
+     [ 5   200    50   400   1000]
+     [ 6   250    63   500   1250]
+     [ 7   300    75   600   1500]
+     [ 8   350    88   700   1750]
+     [ 9   400   100   800   2000]
+     [10   500   125  1000   2500]
+     [11   600   150  1200   3000]
+     [12   700   175  1400   3500]
+     [13   800   200  1600   4000]
+     [14  1000   250  2000   5000]
+     [15  1200   300  2400   6000]
+     [16  1400   350  2800   7000]
+     [17  1600   400  3200   8000]
+     [18  2000   500  4000  10000]
+     [19  2400   600  4800  12000]
+     [20  2800   700  5600  14000]
+     [21  3200   800  6400  16000]
+     [22  4150  1038  8300  20750]
+     [23  5100  1275 10200  25500]
+     [24  6050  1513 12100  30250]
+     [25  7000  1750 14000  35000]
+     [26  9000  2250 18000  45000]
+     [27 11000  2750 22000  55000]
+     [28 13000  3250 26000  65000]
+     [29 15000  3750 30000  75000]
+     [30 19000  4750 38000  95000]
+     [31 23000  5750 46000 115000]
+     [32 27000  6750 54000 135000]
+     [33 31000  7750 62000 155000]
+     [34 39000  9750 78000 195000]
+     [35 47000 11750 94000 235000])))
 
-       (define is
-         (filter
-          (λ (xe)
-            (and (list? xe)
-                 (eq? 'input (first xe))))
-          (se-path*/list '(html body form) data-xe)))
+(define (plan-encounters! player-count)
+  (displayln
+   (table->string
+    (for/fold ([prev-xp 0]
+               [tbl empty]
+               #:result
+               (cons (list "Level" "XP (Player)"
+                           "XP (Party)"
+                           "Encounters")
+                     (reverse tbl)))
+              ([level (in-range 1 30)])
+      (match-define (list required-xp) (hash-ref TotalXP-PHB-pg29 (+ 1 level)))
+      (define xp-left (- required-xp prev-xp))
 
-       (match-define
-        `(input ((id "__VIEWSTATE") (name ,viewstate-name) (type "hidden")
-                 (value ,viewstate-value)))
-        (first is))
-       (match-define
-        `(input ((id "__EVENTVALIDATION") (name ,ev-name) (type "hidden")
-                 (value ,ev-value)))
-        (second is))
+      (define (standard-xp level)
+        (first (hash-ref ExperiencePointRewards-DMG-pg56 level)))
+      (define per-encounter-hard
+        (ceiling
+         (* (standard-xp (+ level 4))
+            player-count)))
 
-       (let ()
-         (define login-data
-           (alist->form-urlencoded
-            (list (cons (string->symbol viewstate-name) viewstate-value)
-                  (cons (string->symbol ev-name) ev-value)
-                  (cons 'email email)
-                  (cons 'password password)
-                  (cons 'InsiderSignin "Sign In"))))
-         (define-values (st hd data)
-           (http-sendrecv/url+throttle
-            #:method "POST"
-            #:data login-data
-            #:headers (list "Content-Type: application/x-www-form-urlencoded")
-            0 login-url))
+      (define xp-left-party (* player-count xp-left))
 
-         ;; xxx this is it
+      (define (dole-encounters xp es)
+        (define s (sum es))
+        (unless (= s 100)
+          (error 'dole-encounters "Encounters do not total 100%, s=~e" s))
+        (for/list ([e (in-list es)])
+          (ceiling (* xp (/ e 100)))))
+      (define xp-encounters (dole-encounters xp-left-party '(15 20 15 25 25)))
 
-         (displayln st)
-         (for-each displayln (filter (λ (h) (regexp-match #rx"Set-Cookie:" h)) hd))
-         (displayln (port->string data))
+      (define encounters
+        (ceiling (/ xp-left-party per-encounter-hard)))
+      
+      (values
+       required-xp
+       (cons (list level xp-left xp-left-party encounters)
+             tbl))))))
 
-         (exit 0))])]
-    [(regexp-match #rx"200" st)
-     (values st hd data)]
-    [else
-     (error 'http-sendrecv/url+throttle+login
-            "Unknown response: ~e" (vector st hd (port->bytes data)))]))
+;; DMG 126-- has a table of magic item rewards
 
 (module+ main
-  (define RATE 2)
-  (define-runtime-path here ".")
-  (define dest-dir (build-path here "ddi"))
-  (define static-dir (build-path dest-dir "static"))
-  (make-directory* dest-dir)
-  (make-directory* static-dir)
-
-  (define EMAIL (first (file->lines (build-path here ".ddi_email"))))
-  (define PASSWORD (first (file->lines (build-path here ".ddi_pass"))))
-  (define COOKIE (file->string (build-path here ".ddi_cookie")))
-
-  (collapse-whitespace #t)
-  (xexpr-drop-empty-attributes #t)
-
-  (define all 0)
-  (for ([t (in-list tabs)])
-    (printf "~a\n" t)
-
-    (define tab.xml (build-path dest-dir (format "~a.xml" t)))
-    (unless (file-exists? tab.xml)
-      (define tab-url-s (format all-url-s t))
-      (define tab-url (string->url tab-url-s))
-      (define-values (st hd data) (http-sendrecv/url+throttle RATE tab-url))
-      (display-to-file (port->bytes data) tab.xml))
-
-    (define xs (file->string tab.xml))
-    (define xe (string->xexpr xs))
-
-    (match-define
-     `((Table ,(== t)) (Total ,(app string->number expected-total)))
-     (se-path*/list+tags '(Data Totals Tab) xe))
-
-    (define rs
-      (se-path*/list+tags '(Data Results) xe))
-    (define actual-total
-      (length rs))
-
-    (unless (= expected-total actual-total)
-      (error 'ddi "~a: count mismatch: ~e vs ~e"
-             t expected-total actual-total))
-
-    (printf " ~a\n" actual-total)
-    (set! all (+ all actual-total))
-
-    (define tab.db (build-path dest-dir (format "~a.db" t)))
-    (make-directory* tab.db)
-    (for ([r (in-list rs)]
-          ;; (in-range 1)
-          [i (in-naturals)])
-      (with-handlers ([exn:fail?
-                       (λ (x)
-                         ((error-display-handler) (exn-message x) x))])
-        (match-define `(,_ " " (ID ,ID) . ,_) r)
-        (define ID.entry (build-path tab.db ID))
-        (unless (file-exists? ID.entry)
-          (define ID.url-s
-            (format entry-url-s
-                    ;; "skill" and "companion" are necessary for like
-                    ;; 7 entries from Glossary and Familiars
-                    (string-downcase t)
-                    ID))
-          (printf "  ~a/~a. ~a\n" i actual-total ID.url-s)
-          (define ID.url
-            (string->url ID.url-s))
-
-          (define-values (st hd data)
-            (http-sendrecv/url+throttle+login EMAIL PASSWORD COOKIE RATE ID.url))
-
-          (display-to-file (port->bytes data) ID.entry))
-
-        (let ()
-          (local-require sxml/html
-                         sxml)
-          (define xe (html->xexp (file->string ID.entry)))
-
-          (define statics
-            (append ((sxpath '(// link @ href *text*)) xe)
-                    ((sxpath '(// img @ src *text*)) xe)))
-
-          (for ([ms (in-list statics)])
-            (define-values
-              (s url-s)
-              (if (regexp-match #rx"^http:" ms)
-                (values (string-join
-                         (map path/param-path
-                              (url-path (string->url ms)))
-                         "/")
-                        ms)
-                (values ms (format static-url-s ms))))
-            (define static.pth (build-path static-dir s))
-            (unless (file-exists? static.pth)
-              (printf "~a\n" s)
-              (make-directory* (path-only static.pth))
-              (define static.url (string->url url-s))
-
-              (define-values (st hd data)
-                (http-sendrecv/url+throttle+login
-                 EMAIL PASSWORD COOKIE RATE
-                 static.url))
-              (display-to-file (port->bytes data) static.pth)))))))
-
-  (printf "Database Size: ~a\n" all)
-  (printf "Seconds between Requests: ~a\n"
-          (real->decimal-string
-           (/ (* 60 60 24 28) all))))
+  (monster-initialize!)
+  (plan-encounters! 4))
