@@ -134,13 +134,13 @@
   (displayln
    (table->string
     (for/fold ([prev-xp 0]
-               [tbl empty]
+               [tbl (list (list "Level" "XP (Player)"
+                                "XP (Party)"
+                                "#" "Monsters"))]
                #:result
-               (cons (list "Level" "XP (Player)"
-                           "XP (Party)"
-                           "Encounters")
-                     (reverse tbl)))
-              ([level (in-range 1 30)])
+               tbl)
+              ([level (in-range 1 30)]
+               [xxx (in-range 5)])
       (match-define (list required-xp) (hash-ref TotalXP-PHB-pg29 (+ 1 level)))
       (define xp-left (- required-xp prev-xp))
 
@@ -161,13 +161,18 @@
           (ceiling (* xp (/ e 100)))))
       (define xp-encounters (dole-encounters xp-left-party '(15 20 15 25 25)))
 
-      (define encounters
+      (define how-many-encounters
         (ceiling (/ xp-left-party per-encounter-hard)))
-      
+      (define encounters
+        (for/list ([i (in-naturals 1)]
+                   [e (in-range how-many-encounters)])
+          (list "" "" "" i "XXX")))
+
       (values
        required-xp
-       (cons (list level xp-left xp-left-party encounters)
-             tbl))))))
+       (append tbl
+               (cons (list level xp-left xp-left-party "" "")
+                     encounters)))))))
 
 ;; DMG 126-- has a table of magic item rewards
 
