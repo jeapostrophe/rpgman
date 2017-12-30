@@ -54,7 +54,9 @@
         m)
       (define sbs (list->set (string-list->list sb)))
       (unless (set-empty? (set-intersect sbs okay-source-books))
-        (query-exec db stmt id name lvl gr cr)))))
+        (query-exec db stmt id name lvl gr cr))))
+
+  (disconnect db))
 
 (define TotalXP-PHB-pg29
   (make-immutable-hasheq
@@ -130,6 +132,118 @@
      [35 47000 11750 94000 235000])))
 
 (define (plan-encounters! player-count)
+  (define db (sqlite3-connect #:database (build-path ddi "Monster.sqlite")
+                              #:mode 'read-only))
+
+  ;; Library
+  (define (xp-rewards level)
+    (or (hash-ref ExperiencePointRewards-DMG-pg56 level #f)
+        (xp-rewards (sub1 level))))
+  (define (monster-xp what level)
+    (match-define (list standard minion elite solo)
+      (xp-rewards level))
+    (match what
+      ['Solo solo]
+      ['Elite elite]
+      ['Minion minion]
+      [(or 'Standard 'Skirmisher 'Controller 'Artillery 'Soldier 'Brute 'Lurker)
+       standard]
+      [(? list?)
+       (apply max
+              (for/list ([w (in-list what)])
+                (monster-xp w level)))]))
+  (define (mob-xp t)
+    (match-define (vector how-many what level) t)
+    (* how-many (monster-xp what level)))
+  (define (template-xp t)
+    (for/sum ([t (in-list t)]) (mob-xp t)))
+
+  (define (what->sql-where what)
+    (match what
+      [(or 'Solo 'Elite 'Minion)
+       (~a "GroupRole LIKE '%"what"%'")]
+      [(or 'Skirmisher 'Controller 'Artillery 'Soldier 'Brute 'Lurker)
+       (~a "CombatRole LIKE '%"what"%'")]
+      [(list a b)
+       (~a "(" (what->sql-where a) " OR " (what->sql-where b) ")")]))
+  
+  (define (plan-mob disp t)
+    (match-define (vector how-many what level) t)
+    (define xp-budget (mob-xp t))
+    (pretty-write t)
+
+    (define available-mobs
+      (query-rows db
+                  (sj "SELECT "
+                      "ID, Name, Level, GroupRole, CombatRole "
+                      "FROM Monsters "
+                      "WHERE Level <= $1 "
+                      "AND " (what->sql-where what))
+                  level))
+
+    (define all-mob-infos
+      (for/list ([m (in-list available-mobs)])
+        (match-define (vector id name level (app string->symbol what) _) m)
+        (vector id name (monster-xp what level))))
+    (define (mob-info-xp m)
+      (define actual-cost (vector-ref m 2))
+      (define how-many-make-that-fract (/ xp-budget actual-cost))
+      (define how-many-make-that-int (floor how-many-make-that-fract))
+      (define effective-cost (* actual-cost how-many-make-that-int))
+      effective-cost)
+    (define mob-infos
+      (sort all-mob-infos >= #:key mob-info-xp))
+
+    (define (greedy left available)
+      (match available
+        ['() empty]
+        [(cons m available)
+         (define x (mob-info-xp m))
+         (define remaining (- left x))
+         (if (negative? remaining)
+           (greedy left available)
+           (cons m (greedy remaining available)))]))
+
+    (local-require non-det/opt)
+
+    (struct mobs-state (potential bought score score-bound) #:prefab)
+    (define (cost-of l)
+      (for/sum ([m (in-list l)])
+        (mob-info-xp m)))
+    (define (mobs-state* potential bought)
+      (define spent (cost-of bought))
+      (define budget-spent (- xp-budget spent))
+      (define score (abs budget-spent))
+      (define score-bound
+        (if (negative? budget-spent)
+          score
+          0))
+      (mobs-state potential bought score score #;-bound))
+    (define (branch ms)
+      (match-define (mobs-state potential bought _ _) ms)
+      (match potential
+        ['() empty]
+        [(cons a d)
+         (list (candidate* (mobs-state* d (cons a bought)))
+               (candidate* (mobs-state* d bought)))]))
+    (define (candidate* ms)
+      (if (empty? (mobs-state-potential ms))
+        (solution mobs-state-score ms)
+        (candidate mobs-state-score-bound branch ms)))
+    (define sol
+      (optimize (candidate* (mobs-state* mob-infos empty))
+                (list (candidate* (mobs-state* empty (greedy xp-budget mob-infos))))))
+    
+    (pretty-write sol)
+    (exit 1)
+    
+    ;; XXX
+    (disp t))
+  (define (plan-mobs disp mobs)
+    (for-each (λ (m) (plan-mob disp m)) mobs))
+
+  ;; Main
+
   (define level-sep (~a (make-string 80 #\-) "\n"))
   (define (col-sep v)
     (define s (~a v))
@@ -185,23 +299,6 @@
        (vector "Wolf Pack" (list (vector 4 'Skirmisher (+ level 5))))
        (vector "Wolf Pack" (list (vector 6 'Skirmisher (+ level 2))))))
 
-    (define (monster-xp what level)
-      (match-define (list standard minion elite solo)
-        (hash-ref ExperiencePointRewards-DMG-pg56 level))
-      (match what
-        ['Solo solo]
-        ['Elite elite]
-        [(or 'Skirmisher 'Controller 'Artillery 'Soldier 'Brute 'Lurker)
-         standard]
-        [(? list?)
-         (apply max
-                (for/list ([w (in-list what)])
-                  (monster-xp w level)))]))
-    (define (template-xp t)
-      (for/sum ([t (in-list t)])
-        (match-define (vector how-many what level) t)
-        (* how-many (monster-xp what level))))
-
     (display (~a (col-sep level) xp-left-party "\n"))
     (define how-many-encounters
       (ceiling (/ xp-left-party per-encounter-hard)))
@@ -216,8 +313,9 @@
       (display (~a (col-sep "") (col-sep xp-after-this)
                    "Reward: " "Magic-" (+ level e) "\n"))
       (display (~a (col-sep "") (col-sep "") "= "template-id "\n"))
-      ()
-      (display (~a (col-sep "") (col-sep "") mobs "\n"))
+      (plan-mobs
+       (λ (s) (display (~a (col-sep "") (col-sep "") s "\n")))
+       mobs)
       ;; DMG 126 -- has a table of magic item rewards that
       ;; is like this, except that it starts at (+ level e
       ;; 1) and only gives four per level.
@@ -230,8 +328,22 @@
 
     required-xp)
 
-  (void))
+  (disconnect db))
 
+;; XXX Rewards --- It ends up that there will be about 5 (sometimes 6)
+;; magic items of every level. Given that it is spec'd for a 4 player
+;; party, this means each character will get about one per level. The
+;; best thing to do then is to have each player pre-plan what they
+;; would get if they got something of that level, so you can easily
+;; figure it out post-battle.
+
+;; XXX Gauntlet --- I imagine some sort of "encounter point" system
+;; where if you win you get one and if you lose you lose one. You can
+;; spend one at the end of a battle to get the reward. You can spend
+;; one at the start of a battle to get advantage/initiative/set up the
+;; map/etc. You can receive one at the start of a battle to let the
+;; other side have those things. In between battles, you face a number
+;; of skill challenges that result in gaining or paying them.
 
 (module+ main
   (monster-initialize!)
