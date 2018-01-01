@@ -28,7 +28,9 @@
    #;"Monster Manual"
    ;; Supposedly these two books are great
    "Monster Manual 3"
-   "Monster Vault"))
+   "Monster Vault"
+   ;; This is recommended too
+   "Demonomicon"))
 (define (monster-initialize!)
   (define db (sqlite3-connect #:database (build-path ddi "Monster.sqlite")
                               #:mode 'create))
@@ -90,7 +92,9 @@
      [27  550000]
      [28  675000]
      [29  825000]
-     [30 1000000])))
+     [30 1000000]
+     ;; Included so that there is some fighting at level 30
+     [31 2000000])))
 
 (define ExperiencePointRewards-DMG-pg56
   (make-immutable-hasheq
@@ -131,6 +135,9 @@
      [34 39000  9750 78000 195000]
      [35 47000 11750 94000 235000])))
 
+(define (random-list-ref l)
+  (list-ref l (random (length l))))
+
 (define (plan-encounters! player-count)
   (define db (sqlite3-connect #:database (build-path ddi "Monster.sqlite")
                               #:mode 'read-only))
@@ -166,81 +173,55 @@
        (~a "CombatRole LIKE '%"what"%'")]
       [(list a b)
        (~a "(" (what->sql-where a) " OR " (what->sql-where b) ")")]))
-  
+
   (define (plan-mob disp t)
-    (match-define (vector how-many what level) t)
-    (define xp-budget (mob-xp t))
-    (pretty-write t)
+    (let/ec return
+      (match-define (vector how-many what level) t)
+      (define xp-budget (mob-xp t))
 
-    (define available-mobs
-      (query-rows db
-                  (sj "SELECT "
-                      "ID, Name, Level, GroupRole, CombatRole "
-                      "FROM Monsters "
-                      "WHERE Level <= $1 "
-                      "AND " (what->sql-where what))
-                  level))
+      (define available-mobs
+        (query-rows db
+                    (sj "SELECT "
+                        "ID, Name, Level, GroupRole, CombatRole "
+                        "FROM Monsters "
+                        "WHERE Level <= $1 "
+                        "AND " (what->sql-where what))
+                    level))
+      (when (empty? available-mobs)
+        (return #f))
 
-    (define all-mob-infos
-      (for/list ([m (in-list available-mobs)])
-        (match-define (vector id name level (app string->symbol what) _) m)
-        (vector id name (monster-xp what level))))
-    (define (mob-info-xp m)
-      (define actual-cost (vector-ref m 2))
-      (define how-many-make-that-fract (/ xp-budget actual-cost))
-      (define how-many-make-that-int (floor how-many-make-that-fract))
-      (define effective-cost (* actual-cost how-many-make-that-int))
-      effective-cost)
-    (define mob-infos
-      (sort all-mob-infos >= #:key mob-info-xp))
+      (struct mob-info (id name level actual-cost how-many-to-have effective-cost score)
+        #:prefab)
+      (define all-mob-infos
+        (for/list ([m (in-list available-mobs)])
+          (match-define (vector id name level (app string->symbol what) _) m)
+          (define actual-cost (monster-xp what level))
+          (define how-many-make-that-fract (/ xp-budget actual-cost))
+          (define how-many-make-that-int (floor how-many-make-that-fract))
+          (define how-many-to-have
+            how-many
+            #;
+            (if (zero? how-many-make-that-int) 1
+                how-many-make-that-int))
+          (define effective-cost (* actual-cost how-many-to-have))
+          (define score (abs (- xp-budget effective-cost)))
+          (mob-info id name level actual-cost how-many-to-have effective-cost score)))
+      (define ranked-mob-infos
+        (sort all-mob-infos <= #:key mob-info-score))
+      (define best-score
+        (mob-info-score (first ranked-mob-infos)))
+      (define best-mob-infos
+        (takef ranked-mob-infos (λ (mi) (= (mob-info-score mi) best-score))))
+      (define sol (random-list-ref best-mob-infos))
+      (let ()
+        (match-define (mob-info id name level _ how-many-to-have effective-cost _) sol)
+        (disp (~a how-many-to-have "x "name" (Lvl "level", "id")"))
+        effective-cost)))
 
-    (define (greedy left available)
-      (match available
-        ['() empty]
-        [(cons m available)
-         (define x (mob-info-xp m))
-         (define remaining (- left x))
-         (if (negative? remaining)
-           (greedy left available)
-           (cons m (greedy remaining available)))]))
-
-    (local-require non-det/opt)
-
-    (struct mobs-state (potential bought score score-bound) #:prefab)
-    (define (cost-of l)
-      (for/sum ([m (in-list l)])
-        (mob-info-xp m)))
-    (define (mobs-state* potential bought)
-      (define spent (cost-of bought))
-      (define budget-spent (- xp-budget spent))
-      (define score (abs budget-spent))
-      (define score-bound
-        (if (negative? budget-spent)
-          score
-          0))
-      (mobs-state potential bought score score #;-bound))
-    (define (branch ms)
-      (match-define (mobs-state potential bought _ _) ms)
-      (match potential
-        ['() empty]
-        [(cons a d)
-         (list (candidate* (mobs-state* d (cons a bought)))
-               (candidate* (mobs-state* d bought)))]))
-    (define (candidate* ms)
-      (if (empty? (mobs-state-potential ms))
-        (solution mobs-state-score ms)
-        (candidate mobs-state-score-bound branch ms)))
-    (define sol
-      (optimize (candidate* (mobs-state* mob-infos empty))
-                (list (candidate* (mobs-state* empty (greedy xp-budget mob-infos))))))
-    
-    (pretty-write sol)
-    (exit 1)
-    
-    ;; XXX
-    (disp t))
   (define (plan-mobs disp mobs)
-    (for-each (λ (m) (plan-mob disp m)) mobs))
+    (let/ec return
+      (for/sum ([m (in-list mobs)])
+        (or (plan-mob disp m) (return #f)))))
 
   ;; Main
 
@@ -252,8 +233,7 @@
   (display level-sep)
 
   (for/fold ([prev-xp 0])
-            ([level (in-range 1 30)]
-             [xxx (in-range 5)])
+            ([level (in-range 1 31)])
     (match-define (list required-xp) (hash-ref TotalXP-PHB-pg29 (+ 1 level)))
     (define xp-left (- required-xp prev-xp))
 
@@ -306,25 +286,40 @@
               ([i (in-naturals 1)]
                [e (in-range how-many-encounters)]
                [t-id*mobs (in-list (shuffle encounter-templates))])
-      (match-define (vector template-id mobs) t-id*mobs)
-      (define this-xp (template-xp mobs))
+
+      (define (try t-id*mobs)
+        (match-define (vector template-id mobs) t-id*mobs)
+        (define mob-disps empty)
+        (define target-xp (template-xp mobs))
+        (define this-xp
+          (plan-mobs
+           (λ (s) (set! mob-disps (cons s mob-disps)))
+           mobs))
+        (if this-xp
+          (values
+           template-id
+           target-xp
+           this-xp
+           (reverse mob-disps))
+          (try (random-list-ref encounter-templates))))
+      (define-values (template-id target-xp this-xp mob-disps)
+        (try t-id*mobs))
+
       (define xp-after-this (+ this-xp xp-so-far))
+
       (display "\n")
       (display (~a (col-sep "") (col-sep xp-after-this)
                    "Reward: " "Magic-" (+ level e) "\n"))
       (display (~a (col-sep "") (col-sep "") "= "template-id "\n"))
-      (plan-mobs
-       (λ (s) (display (~a (col-sep "") (col-sep "") s "\n")))
-       mobs)
+      (for ([s (in-list mob-disps)])
+        (display (~a (col-sep "") (col-sep "") s "\n")))
       ;; DMG 126 -- has a table of magic item rewards that
       ;; is like this, except that it starts at (+ level e
       ;; 1) and only gives four per level.
-      (display (~a (col-sep "") (col-sep "") this-xp "\n"))
+      (display (~a (col-sep "") (col-sep "") this-xp" ("target-xp ")\n"))
 
       xp-after-this)
     (display level-sep)
-
-    ;; xxx generate a web page?
 
     required-xp)
 
@@ -344,6 +339,63 @@
 ;; map/etc. You can receive one at the start of a battle to let the
 ;; other side have those things. In between battles, you face a number
 ;; of skill challenges that result in gaining or paying them.
+
+;; === Advice 1 (from somewhere)
+;; 1. Add hazards to maps
+;; 2. Use monsters from MM3, Monster Vault, and Demonomicon (why?)
+;; 3. Divide monster hit points by 2. Multiply their damage by 1.5.
+
+;; === [[https://rpg.stackexchange.com/questions/42147/how-to-speed-up-4e-combat][Advice 2]]
+;; 1. Limit turn time (+1 token within time, -1 token out of time)
+;; 2. Roll attack and damage together
+;; 3. Use average damage
+;; 4. Change initiative to be like Descent (all monsters, then all
+;;    PCs)
+;; 5. Increase damage to same ratios as Lvl1 ---
+;;    http://dmg42.blogspot.com.au/2012/02/boot-on-face-of-level-1-damage-forever.html
+
+;; === [[https://rpg.stackexchange.com/questions/15591/standard-monster-tactics-for-4e-dd-combat][Advice 3]]
+;; 1. Focus Fire on 1 player
+;; 2. Always target the weakest available monster
+;; 3. Sometimes ignored being marked
+;; 4. Flank players
+;; 5. Make good use of controllers
+;; 6. Protect weak monsters
+;; 7. Use terrain (columns provide cover but don't block your attacks)
+;; 8. Win initiative
+;; 9. Retreat & reinforce the monsters
+;; 10. Encounter Building
+;;     1. Frontline & Backline --- Keep busy & Hard hitters
+;;     2. Monster Synergy --- Complement monsters
+;;     3. Terrain Synergy --- Go heavy
+;;     4. Control is Good --- 30% blockers, 20% damage, 50% control
+;;     5. Don't use Pre-MM3 Solos --- Much more complex and
+;;        interesting
+;;     6. Use Higher Level Monsters when Possible --- 4 Lvl+1 is
+;;        harder than 5 Lvl
+
+;; Use a Kingdom-Death-like system of "Hunt then Showdown then
+;; Settlement"?
+;; - If you succeed on the Hunt, then you get to lay out arena and you
+;;   get to ambush, have initiative, etc.
+;; - If you succeed in the Showdown, then you get a magic item,
+;;   otherwise not
+
+;; https://www.reddit.com/r/DnD/comments/7mokrn/combatboardgamedescentlikecompetitive_dd/
+
+;; Just use Dungeon Delve?
+
+;; Collaborative stage building --- based on largest monster, choose
+;; tile set and go back and forth placing them. Maybe put down one big
+;; stage, then characters, then terrain. Stuff like switch and then
+;; what switch does
+
+;; Incentivize not turtling --- small map and treasure on field
+
+;; D&D tech tree --- instead of levels, use tech points that
+;; corresponds to same stuff as D&D but with scaling so that you get
+;; enough tech points post 10 to multi class
+
 
 (module+ main
   (monster-initialize!)
