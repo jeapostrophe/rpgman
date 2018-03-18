@@ -29,6 +29,12 @@
    ;; Supposedly these two books are great
    "Monster Manual 3"
    "Monster Vault"
+
+   ;; xxx supposedly there are two Monster Vault, one is called
+   ;; Threats to the Nentir Vale
+   
+   ;; xxx also, maybe the dark sun creature catalog
+
    ;; This is recommended too
    "Demonomicon"))
 (define (monster-initialize!)
